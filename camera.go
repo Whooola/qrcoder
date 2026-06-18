@@ -3,12 +3,13 @@ package main
 import (
 	"fmt"
 	"log"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/go-ole/go-ole"
-	"github.com/go-ole/go-ole/oleutil"
 )
 
 // ────────────────────────────────────────────────────────────
@@ -51,6 +52,8 @@ type cameraSession struct {
 	nullRenderer    *ole.IUnknown
 	stopCh          chan struct{}
 	frameCh         chan []byte // raw RGB24 frames
+	closeMu         sync.Mutex
+	stopped         int32 // atomic: 1 when close() has been called
 }
 
 var currentCamera *cameraSession
@@ -68,10 +71,14 @@ func scanFromCamera(outCam **cameraSession) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("打开摄像头失败: %w", err)
 	}
+	activeCameraMu.Lock()
 	*outCam = cam
+	activeCameraMu.Unlock()
 	defer func() {
 		cam.close()
+		activeCameraMu.Lock()
 		*outCam = nil
+		activeCameraMu.Unlock()
 	}()
 
 	// Poll frames and look for QR codes
@@ -137,13 +144,21 @@ func openCamera() (*cameraSession, error) {
 		return nil, fmt.Errorf("QueryInterface ICaptureGraphBuilder2失败: %w", err)
 	}
 
-	// Set filter graph on capture builder
-	oleutil.MustCallMethod(captureBuilder, "SetFiltergraph", graphBuilder)
+	// Set filter graph on capture builder (via vtable[3])
+	err = callSetFiltergraph(captureBuilder, graphBuilder)
+	if err != nil {
+		captureBuilder.Release()
+		graphUnknown.Release()
+		graphBuilder.Release()
+		return nil, fmt.Errorf("SetFiltergraph失败: %w", err)
+	}
 
 	// 3. Find first video capture device
 	deviceMoniker, err := findFirstVideoDevice()
 	if err != nil {
+		graphBuilder.Release()
 		captureBuilder.Release()
+		captureUnknown.Release()
 		graphUnknown.Release()
 		return nil, fmt.Errorf("未检测到摄像头: %w", err)
 	}
@@ -152,7 +167,9 @@ func openCamera() (*cameraSession, error) {
 	sourceFilter, err := bindDeviceToFilter(deviceMoniker)
 	deviceMoniker.Release()
 	if err != nil {
+		graphBuilder.Release()
 		captureBuilder.Release()
+		captureUnknown.Release()
 		graphUnknown.Release()
 		return nil, fmt.Errorf("绑定摄像头设备失败: %w", err)
 	}
@@ -236,8 +253,8 @@ func openCamera() (*cameraSession, error) {
 	}
 	cam.mediaControl = mediaControl
 
-	// 9. Start the graph
-	_, err = oleutil.CallMethod(mediaControl, "Run")
+	// 9. Start the graph (via vtable[3])
+	err = callMediaControlRun(mediaControl)
 	if err != nil {
 		cam.cleanupGraph()
 		return nil, fmt.Errorf("启动视频流失败: %w", err)
@@ -245,6 +262,15 @@ func openCamera() (*cameraSession, error) {
 
 	// 10. Start frame polling goroutine
 	go cam.pollFrames(sampleGrabber)
+
+	// Release local COM interfaces no longer needed.
+	// The filter graph now holds its own references to all filters.
+	graphBuilder.Release()
+	captureBuilder.Release()
+	captureUnknown.Release()
+	sgUnknown.Release()
+	sgFilter.Release()
+	nullFilter.Release()
 
 	log.Println("Camera started successfully")
 	return cam, nil
@@ -255,8 +281,13 @@ func openCamera() (*cameraSession, error) {
 // ────────────────────────────────────────────────────────────
 
 func (cam *cameraSession) close() {
+	cam.closeMu.Lock()
+	defer cam.closeMu.Unlock()
+
+	atomic.StoreInt32(&cam.stopped, 1)
+
 	if cam.mediaControl != nil {
-		oleutil.MustCallMethod(cam.mediaControl, "Stop")
+		callMediaControlStop(cam.mediaControl)
 	}
 	if cam.stopCh != nil {
 		select {
@@ -314,25 +345,23 @@ func (cam *cameraSession) pollFrames(sg *ole.IUnknown) {
 		sizeVar := ole.NewVariant(ole.VT_I4, int32(bufSize))
 		bufVar := ole.NewVariant(ole.VT_ARRAY|ole.VT_UI1, buf)
 
-		// Unfortunately, ISampleGrabber does not expose IDispatch.
-		// We need to call directly through the vtable.
-		// The ISampleGrabber vtable layout (simplified):
+		// ISampleGrabber vtable layout (from qedit.h):
 		//   [0-2] IUnknown: QueryInterface, AddRef, Release
-		//   [3] GetConnectedMediaType
-		//   [4] SetConnectedMediaType
+		//   [3] SetOneShot
+		//   [4] SetMediaType
 		//   [5] GetConnectedMediaType
 		//   [6] SetBufferSamples
-		//   [7] GetBufferSamples
-		//   [8] SetCallback
-		//   [9] SetOneShot
-		//   [10] SetMediaType
-		//   [11] GetCurrentBuffer ← this is what we need
-		//   ...
+		//   [7] GetCurrentBuffer ← this is what we need
+		//   [8] GetSample
+		//   [9] SetCallback
 
-		// Call through vtable — method at index 11 (0-indexed)
-		// This requires raw COM vtable access which go-ole supports
-		// through IUnknown.RawVTable
+		// Call through vtable — method at index 7 (0-indexed)
 		gotFrame := callISampleGrabberGetCurrentBuffer(sg, buf)
+
+		// Check if close() ran during the vtable call (TOCTOU guard)
+		if atomic.LoadInt32(&cam.stopped) != 0 {
+			return
+		}
 
 		if gotFrame {
 			frameCopy := make([]byte, bufSize)
@@ -520,7 +549,7 @@ func bindMonikerToObject(moniker *ole.IUnknown) (*ole.IUnknown, error) {
 		this,
 		0, // pbc = NULL (bind context)
 		0, // pmkToLeft = NULL
-		0, // riidResult = IID_IBaseFilter (but we get IUnknown, will QI later)
+		uintptr(unsafe.Pointer(&IID_IBaseFilter)), // riidResult = IID_IBaseFilter
 		uintptr(unsafe.Pointer(&obj)),
 	)
 	if ret != 0 {
@@ -588,7 +617,7 @@ type BITMAPINFOHEADER_WIN32 struct {
 
 func callSetMediaType(sg *ole.IUnknown) error {
 	vtable := *(**uintptr)(unsafe.Pointer(sg))
-	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 10*unsafe.Sizeof(uintptr(0)))) // SetMediaType at vtable[10]
+	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 4*unsafe.Sizeof(uintptr(0)))) // SetMediaType at vtable[4]
 
 	vih := VIDEOINFOHEADER{
 		AvgTimePerFrame: 333333, // ~30fps (100ns units)
@@ -644,7 +673,7 @@ func callSetBufferSamples(sg *ole.IUnknown, bufferSamples bool) error {
 
 func callSetOneShot(sg *ole.IUnknown, oneShot bool) error {
 	vtable := *(**uintptr)(unsafe.Pointer(sg))
-	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 9*unsafe.Sizeof(uintptr(0)))) // SetOneShot at vtable[9]
+	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 3*unsafe.Sizeof(uintptr(0)))) // SetOneShot at vtable[3]
 
 	bVal := uintptr(0)
 	if oneShot {
@@ -661,7 +690,7 @@ func callSetOneShot(sg *ole.IUnknown, oneShot bool) error {
 
 func callISampleGrabberGetCurrentBuffer(sg *ole.IUnknown, buf []byte) bool {
 	vtable := *(**uintptr)(unsafe.Pointer(sg))
-	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 11*unsafe.Sizeof(uintptr(0)))) // GetCurrentBuffer at vtable[11]
+	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 7*unsafe.Sizeof(uintptr(0)))) // GetCurrentBuffer at vtable[7]
 
 	bufSize := int32(len(buf))
 
@@ -676,9 +705,52 @@ func callISampleGrabberGetCurrentBuffer(sg *ole.IUnknown, buf []byte) bool {
 	return ret == 0 && bufSize > 0
 }
 
+// ────────────────────────────────────────────────────────────
+// ICaptureGraphBuilder2 and IMediaControl vtable calls
+// ────────────────────────────────────────────────────────────
+
+// callSetFiltergraph calls ICaptureGraphBuilder2::SetFiltergraph (vtable[3]).
+func callSetFiltergraph(captureBuilder, graphBuilder *ole.IUnknown) error {
+	vtable := *(**uintptr)(unsafe.Pointer(captureBuilder))
+	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 3*unsafe.Sizeof(uintptr(0))))
+
+	this := uintptr(unsafe.Pointer(captureBuilder))
+	ret, _, _ := syscall.SyscallN(
+		fn,
+		this,
+		uintptr(unsafe.Pointer(graphBuilder)),
+	)
+	if ret != 0 {
+		return fmt.Errorf("SetFiltergraph HRESULT: 0x%X", ret)
+	}
+	return nil
+}
+
+// callMediaControlRun calls IMediaControl::Run (vtable[3] after IUnknown).
+func callMediaControlRun(mediaControl *ole.IUnknown) error {
+	vtable := *(**uintptr)(unsafe.Pointer(mediaControl))
+	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 3*unsafe.Sizeof(uintptr(0))))
+
+	this := uintptr(unsafe.Pointer(mediaControl))
+	ret, _, _ := syscall.SyscallN(fn, this)
+	if ret != 0 {
+		return fmt.Errorf("IMediaControl::Run HRESULT: 0x%X", ret)
+	}
+	return nil
+}
+
+// callMediaControlStop calls IMediaControl::Stop (vtable[4] after IUnknown).
+func callMediaControlStop(mediaControl *ole.IUnknown) {
+	vtable := *(**uintptr)(unsafe.Pointer(mediaControl))
+	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 4*unsafe.Sizeof(uintptr(0))))
+
+	this := uintptr(unsafe.Pointer(mediaControl))
+	syscall.SyscallN(fn, this)
+}
+
 func callRenderStream(captureBuilder *ole.IUnknown, pinCategory, mediaType *ole.GUID, source, sg, nullRenderer *ole.IUnknown) error {
 	vtable := *(**uintptr)(unsafe.Pointer(captureBuilder))
-	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 4*unsafe.Sizeof(uintptr(0)))) // RenderStream at vtable[4]
+	fn := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + 7*unsafe.Sizeof(uintptr(0)))) // RenderStream at vtable[7]
 
 	this := uintptr(unsafe.Pointer(captureBuilder))
 	ret, _, _ := syscall.SyscallN(

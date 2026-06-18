@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"unicode/utf8"
 
 	"github.com/makiuchi-d/gozxing"
 	"github.com/makiuchi-d/gozxing/qrcode"
@@ -40,7 +41,7 @@ func generateQR(text string) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("二维码编码失败: %w", err)
 	}
 
-	return renderQRPNG(code, truncated), nil, nil
+	return renderQRPNG(code, truncated), truncated, nil
 }
 
 // needsTruncation checks if text exceeds QR V40-H capacity.
@@ -55,13 +56,20 @@ func needsTruncation(text string) bool {
 
 // truncateText truncates text to fit within QR V40-H limits.
 func truncateText(text string) string {
+	// First, limit by rune count
 	runes := []rune(text)
 	if len(runes) > qrMaxAlphanumeric {
 		runes = runes[:qrMaxAlphanumeric]
 	}
 	result := string(runes)
+	// If still over byte limit, truncate at last valid UTF-8 boundary
 	if len(result) > qrMaxBytes {
-		result = result[:qrMaxBytes]
+		// Walk backwards from qrMaxBytes to find a valid UTF-8 start byte
+		truncated := result[:qrMaxBytes]
+		for len(truncated) > 0 && !utf8.ValidString(truncated) {
+			truncated = truncated[:len(truncated)-1]
+		}
+		return truncated
 	}
 	return result
 }

@@ -44,10 +44,6 @@ var (
 	otherKeyDown bool // true if a non-Ctrl key was pressed during Ctrl hold
 )
 
-// onDoubleCtrl is the callback invoked when double-Ctrl is detected.
-// Set by main before starting the hook. Runs in the hook thread context.
-var onDoubleCtrl func()
-
 // ────────────────────────────────────────────────────────────
 // Exported Go function called from C trampoline (hook.c)
 // ────────────────────────────────────────────────────────────

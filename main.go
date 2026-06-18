@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"runtime"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -245,6 +246,7 @@ var (
 	mainHWND        HANDLE
 	scanPreviewHWND HANDLE
 	activeCamera    *cameraSession
+	activeCameraMu  sync.Mutex
 	trayUID         UINT = 1
 	trayMenu        HMENU
 	autoStart       bool
@@ -408,10 +410,14 @@ func mainWindowProc(hwnd HANDLE, msg UINT, wParam WPARAM, lParam LPARAM) LRESULT
 
 	case WM_CLOSE_PREVIEW:
 		// Stop active camera and close preview window
-		if activeCamera != nil {
-			activeCamera.close()
-			activeCamera = nil
-		}
+		func() {
+			activeCameraMu.Lock()
+			defer activeCameraMu.Unlock()
+			if activeCamera != nil {
+				activeCamera.close()
+				activeCamera = nil
+			}
+		}()
 		if scanPreviewHWND != 0 {
 			destroyWindow(scanPreviewHWND)
 			scanPreviewHWND = 0
@@ -500,17 +506,25 @@ func handleScan() {
 		} else {
 			// Post success: wParam=1, lParam=pointer to result text
 			textPtr := allocGlobalString(result)
-			postMsg.Call(uintptr(mainHWND), WM_SCAN_RESULT, 1, textPtr)
+			if textPtr == 0 {
+				postMsg.Call(uintptr(mainHWND), WM_SCAN_RESULT, 0, 0)
+			} else {
+				postMsg.Call(uintptr(mainHWND), WM_SCAN_RESULT, 1, textPtr)
+			}
 		}
 	}()
 }
 
 func handleScanResult(success uint32, lParam LPARAM) {
-	// Clean up camera and preview window
-	if activeCamera != nil {
-		activeCamera.close()
-		activeCamera = nil
-	}
+	// Clean up camera and preview window (protected by mutex)
+	func() {
+		activeCameraMu.Lock()
+		defer activeCameraMu.Unlock()
+		if activeCamera != nil {
+			activeCamera.close()
+			activeCamera = nil
+		}
+	}()
 	if scanPreviewHWND != 0 {
 		destroyWindow(scanPreviewHWND)
 		scanPreviewHWND = 0
@@ -520,7 +534,7 @@ func handleScanResult(success uint32, lParam LPARAM) {
 		result := readGlobalString(lParam)
 		freeGlobalString(lParam)
 		showScanResult(result)
-	} else if success == 0 {
+	} else {
 		showError("扫描失败", "未识别到二维码")
 	}
 }
@@ -545,7 +559,15 @@ func allocGlobalString(s string) uintptr {
 }
 
 func readGlobalString(mem uintptr) string {
-	return syscall.UTF16ToString(unsafe.Slice((*uint16)(unsafe.Pointer(mem)), 65536))
+	// Walk the UTF-16 string to find its null terminator, then
+	// create a correctly-sized slice instead of a huge unsafe one.
+	const maxLen = 65536
+	s := unsafe.Slice((*uint16)(unsafe.Pointer(mem)), maxLen)
+	n := 0
+	for n < maxLen && s[n] != 0 {
+		n++
+	}
+	return syscall.UTF16ToString(s[:n])
 }
 
 func freeGlobalString(mem uintptr) {
@@ -630,10 +652,12 @@ func writeAutoStart() {
 }
 
 func deleteAutoStart() {
+	subKey, _ := windows.UTF16PtrFromString(`Software\Microsoft\Windows\CurrentVersion\Run`)
+	valName, _ := windows.UTF16PtrFromString("QRCoder")
 	err := windows.RegDeleteKeyValue(
 		windows.HKEY_CURRENT_USER,
-		`Software\Microsoft\Windows\CurrentVersion\Run`,
-		"QRCoder",
+		subKey,
+		valName,
 	)
 	if err != nil {
 		log.Printf("RegDeleteKeyValue failed: %v", err)
@@ -642,8 +666,8 @@ func deleteAutoStart() {
 
 func getModuleFileName() string {
 	buf := make([]uint16, 260)
-	user32 := windows.NewLazySystemDLL("user32.dll")
-	getModuleFileName := user32.NewProc("GetWindowModuleFileNameW")
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	getModuleFileName := kernel32.NewProc("GetModuleFileNameW")
 	n, _, _ := getModuleFileName.Call(0, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 	if n == 0 {
 		return ""

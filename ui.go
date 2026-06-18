@@ -18,6 +18,13 @@ import (
 
 const GWLP_USERDATA = -21
 
+// uiData keeps Go references to per-window data structs alive, preventing
+// GC from collecting them while they are referenced only by uintptr in GWLP_USERDATA.
+var (
+	uiDataMu sync.Mutex
+	uiData   = map[HANDLE]interface{}{}
+)
+
 type qrPopupData struct {
 	pngBytes    []byte
 	charCount   int
@@ -143,6 +150,9 @@ func qrPopupWndProc(hwnd HANDLE, msg UINT, wParam WPARAM, lParam LPARAM) LRESULT
 
 	case WM_DESTROY:
 		// Clean up allocated data (allocated with new in showQRPopup)
+		uiDataMu.Lock()
+		delete(uiData, hwnd)
+		uiDataMu.Unlock()
 		return 0
 	}
 
@@ -321,6 +331,7 @@ func copyQRToClipboard(pngBytes []byte) {
 	if hBmp == 0 {
 		return
 	}
+	defer gdi32.NewProc("DeleteObject").Call(hBmp)
 
 	user32.NewProc("OpenClipboard").Call(uintptr(mainHWND))
 	user32.NewProc("EmptyClipboard").Call()
@@ -356,6 +367,9 @@ func showScanPreview(outHwnd *HANDLE) {
 		done:     make(chan struct{}),
 	}
 	setWindowLongPtr(hwnd, GWLP_USERDATA, uintptr(unsafe.Pointer(data)))
+	uiDataMu.Lock()
+	uiData[hwnd] = data
+	uiDataMu.Unlock()
 
 	*outHwnd = hwnd
 
@@ -390,6 +404,12 @@ func scanPreviewWndProc(hwnd HANDLE, msg UINT, wParam WPARAM, lParam LPARAM) LRE
 		return 0
 	case WM_ERASEBKGND:
 		return 1
+	case WM_DESTROY:
+		// Handled — do NOT call DefWindowProcW to avoid PostQuitMessage
+		uiDataMu.Lock()
+		delete(uiData, hwnd)
+		uiDataMu.Unlock()
+		return 0
 	}
 
 	user32 := windows.NewLazySystemDLL("user32.dll")
@@ -495,6 +515,9 @@ func showScanResult(text string) {
 
 	data := &resultPopupData{resultText: text}
 	setWindowLongPtr(hwnd, GWLP_USERDATA, uintptr(unsafe.Pointer(data)))
+	uiDataMu.Lock()
+	uiData[hwnd] = data
+	uiDataMu.Unlock()
 
 	showWindow(hwnd, 1)
 	updateWindow(hwnd)
@@ -514,6 +537,12 @@ func resultPopupWndProc(hwnd HANDLE, msg UINT, wParam WPARAM, lParam LPARAM) LRE
 		return 1
 	case WM_CLOSE:
 		destroyWindow(hwnd)
+		return 0
+	case WM_DESTROY:
+		// Handled — do NOT call DefWindowProcW to avoid PostQuitMessage
+		uiDataMu.Lock()
+		delete(uiData, hwnd)
+		uiDataMu.Unlock()
 		return 0
 	}
 

@@ -180,6 +180,12 @@ func lpwstrToString(ptr *uint16) string {
 	if ptr == nil {
 		return ""
 	}
-	return syscall.UTF16ToString(unsafe.Slice(ptr, 65536))
+	const maxLen = 65536
+	s := unsafe.Slice(ptr, maxLen)
+	n := 0
+	for n < maxLen && s[n] != 0 {
+		n++
+	}
+	return syscall.UTF16ToString(s[:n])
 }
 
