@@ -200,7 +200,7 @@ func paintQRPopup(hwnd HANDLE, data *qrPopupData) {
 
 	// Fill background white
 	fillRect := user32.NewProc("FillRect")
-	whiteBrush := gdi32.NewProc("GetStockObject").Call(0) // WHITE_BRUSH = 0
+	whiteBrush, _, _ := gdi32.NewProc("GetStockObject").Call(0) // WHITE_BRUSH = 0
 	fillRect.Call(hdc, uintptr(unsafe.Pointer(&rect)), whiteBrush)
 
 	// Create compatible DC and bitmap for the image
@@ -435,7 +435,7 @@ func paintScanPreview(hwnd HANDLE) {
 	defer user32.NewProc("EndPaint").Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
 
 	// Fill black background
-	blackBrush := gdi32.NewProc("GetStockObject").Call(4) // BLACK_BRUSH = 4
+	blackBrush, _, _ := gdi32.NewProc("GetStockObject").Call(4) // BLACK_BRUSH = 4
 	user32.NewProc("FillRect").Call(hdc, uintptr(unsafe.Pointer(&rect)), blackBrush)
 
 	// Draw green guide frame (centered, 60% of window)
@@ -454,7 +454,7 @@ func paintScanPreview(hwnd HANDLE) {
 	}
 
 	// Draw hollow rectangle using brush
-	nullBrush := gdi32.NewProc("GetStockObject").Call(5) // NULL_BRUSH
+	nullBrush, _, _ := gdi32.NewProc("GetStockObject").Call(5) // NULL_BRUSH
 	oldBrush, _, _ := gdi32.NewProc("SelectObject").Call(hdc, nullBrush)
 	defer gdi32.NewProc("SelectObject").Call(hdc, oldBrush)
 
@@ -484,7 +484,7 @@ func paintScanPreview(hwnd HANDLE) {
 	user32.NewProc("DrawTextW").Call(
 		hdc,
 		uintptr(unsafe.Pointer(hintText)),
-		-1,
+		^uintptr(0), // -1 means auto-calculate text length
 		uintptr(unsafe.Pointer(&textRect)),
 		0x00000001|0x00000020, // DT_CENTER | DT_SINGLELINE
 	)
@@ -587,7 +587,7 @@ func paintResultPopup(hwnd HANDLE, data *resultPopupData) {
 	user32.NewProc("DrawTextW").Call(
 		hdc,
 		uintptr(unsafe.Pointer(text)),
-		-1,
+		^uintptr(0), // -1 means auto-calculate text length
 		uintptr(unsafe.Pointer(&textRect)),
 		0x00000000|0x00000010, // DT_LEFT | DT_WORDBREAK
 	)

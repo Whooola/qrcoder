@@ -141,9 +141,10 @@ type WNDCLASSEXW struct {
 // registerWindowClass registers a window class with the given
 // name and window procedure callback.
 func registerWindowClass(className string, wndProc uintptr) error {
-	hInst, err := windows.GetModuleHandle(nil)
-	if err != nil {
-		return fmt.Errorf("GetModuleHandle: %w", err)
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	hInst, _, _ := kernel32.NewProc("GetModuleHandleW").Call(0)
+	if hInst == 0 {
+		return fmt.Errorf("GetModuleHandleW failed")
 	}
 
 	cname, _ := syscall.UTF16PtrFromString(className)
@@ -173,9 +174,10 @@ func registerWindowClass(className string, wndProc uintptr) error {
 
 // createWindow creates a window of the given class.
 func createWindow(className, windowName string, style uint32, x, y, w, h int32, parent HANDLE) (HANDLE, error) {
-	hInst, err := windows.GetModuleHandle(nil)
-	if err != nil {
-		return 0, fmt.Errorf("GetModuleHandle: %w", err)
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	hInst, _, _ := kernel32.NewProc("GetModuleHandleW").Call(0)
+	if hInst == 0 {
+		return 0, fmt.Errorf("GetModuleHandleW failed")
 	}
 
 	cname, _ := syscall.UTF16PtrFromString(className)
@@ -300,10 +302,13 @@ func removeTrayIcon() {
 
 func loadAppIcon() (HANDLE, error) {
 	// Try resource ID 2 (the .syso icon)
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	hMod, _, _ := kernel32.NewProc("GetModuleHandleW").Call(0)
+
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	loadIcon := user32.NewProc("LoadIconW")
 	handle, _, _ := loadIcon.Call(
-		uintptr(windows.GetModuleHandle(nil)),
+		hMod,
 		uintptr(uint16(2)), // MAKEINTRESOURCE(2)
 	)
 	if handle == 0 {
@@ -614,54 +619,105 @@ func shutdownApp() {
 	unhookHotkey()
 	releaseSingleInstance()
 	shutdownCOM()
-	windows.PostQuitMessage(0)
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	user32.NewProc("PostQuitMessage").Call(0)
 }
 
 // ────────────────────────────────────────────────────────────
 // Auto-start via registry
 // ────────────────────────────────────────────────────────────
 
+const (
+	_HKEY_CURRENT_USER      = 0x80000001
+	_KEY_SET_VALUE          = 2
+	_REG_SZ                = 1
+	_REG_OPTION_NON_VOLATILE = 0
+)
+
 func writeAutoStart() {
-	key, err := windows.RegCreateKeyEx(
-		windows.HKEY_CURRENT_USER,
-		windows.StringToUTF16Ptr(`Software\Microsoft\Windows\CurrentVersion\Run`),
-		0, nil, windows.REG_OPTION_NON_VOLATILE, windows.KEY_SET_VALUE, nil,
+	advapi32 := windows.NewLazySystemDLL("advapi32.dll")
+	regCreateKeyEx := advapi32.NewProc("RegCreateKeyExW")
+
+	subKey, _ := syscall.UTF16PtrFromString(`Software\Microsoft\Windows\CurrentVersion\Run`)
+
+	var hKey windows.Handle
+	ret, _, _ := regCreateKeyEx.Call(
+		_HKEY_CURRENT_USER,
+		uintptr(unsafe.Pointer(subKey)),
+		0, 0, _REG_OPTION_NON_VOLATILE,
+		_KEY_SET_VALUE,
+		0,
+		uintptr(unsafe.Pointer(&hKey)),
+		0,
 	)
-	if err != nil {
-		log.Printf("RegCreateKeyEx failed: %v", err)
+	if ret != 0 {
+		log.Printf("RegCreateKeyEx failed: 0x%X", ret)
 		return
 	}
-	defer windows.RegCloseKey(key)
+	defer advapi32.NewProc("RegCloseKey").Call(uintptr(hKey))
 
-	exePath, _ := windows.GetCurrentProcess().Exe()
-	if exePath == "" {
-		// Fallback: use GetModuleFileName
-		exePath = getModuleFileName()
-	}
+	exePath := getModuleFileName()
 
-	err = windows.RegSetValueEx(
-		key,
-		windows.StringToUTF16Ptr("QRCoder"),
-		0, windows.REG_SZ,
-		[]byte(exePath+"\x00"),
+	exePathUTF16, _ := syscall.UTF16FromString(exePath)
+	exePathBytes := unsafe.Slice((*byte)(unsafe.Pointer(&exePathUTF16[0])), len(exePathUTF16)*2+2)
+
+	valName, _ := syscall.UTF16PtrFromString("QRCoder")
+	regSetValueEx := advapi32.NewProc("RegSetValueExW")
+	ret, _, _ = regSetValueEx.Call(
+		uintptr(hKey),
+		uintptr(unsafe.Pointer(valName)),
+		0, _REG_SZ,
+		uintptr(unsafe.Pointer(&exePathBytes[0])),
+		uintptr(len(exePathBytes)),
 	)
-	if err != nil {
-		log.Printf("RegSetValueEx failed: %v", err)
+	if ret != 0 {
+		log.Printf("RegSetValueEx failed: 0x%X", ret)
 		autoStart = false
 	}
 }
 
 func deleteAutoStart() {
-	subKey, _ := windows.UTF16PtrFromString(`Software\Microsoft\Windows\CurrentVersion\Run`)
-	valName, _ := windows.UTF16PtrFromString("QRCoder")
-	err := windows.RegDeleteKeyValue(
-		windows.HKEY_CURRENT_USER,
-		subKey,
-		valName,
+	advapi32 := windows.NewLazySystemDLL("advapi32.dll")
+	subKey, _ := syscall.UTF16PtrFromString(`Software\Microsoft\Windows\CurrentVersion\Run`)
+	valName, _ := syscall.UTF16PtrFromString("QRCoder")
+	advapi32.NewProc("RegDeleteValueW").Call(
+		_HKEY_CURRENT_USER,
+		uintptr(unsafe.Pointer(subKey)),
+		uintptr(unsafe.Pointer(valName)),
 	)
-	if err != nil {
-		log.Printf("RegDeleteKeyValue failed: %v", err)
+}
+
+func checkAutoStart() bool {
+	advapi32 := windows.NewLazySystemDLL("advapi32.dll")
+	subKey, _ := syscall.UTF16PtrFromString(`Software\Microsoft\Windows\CurrentVersion\Run`)
+	valName, _ := syscall.UTF16PtrFromString("QRCoder")
+
+	var hKey windows.Handle
+	ret, _, _ := advapi32.NewProc("RegOpenKeyExW").Call(
+		_HKEY_CURRENT_USER,
+		uintptr(unsafe.Pointer(subKey)),
+		0, 1, // KEY_QUERY_VALUE = 1
+		uintptr(unsafe.Pointer(&hKey)),
+	)
+	if ret != 0 {
+		return false
 	}
+	defer advapi32.NewProc("RegCloseKey").Call(uintptr(hKey))
+
+	// Query the value to check if it exists and is non-empty
+	buf := make([]uint16, 520) // MAX_PATH * 2
+	bufLen := uint32(len(buf) * 2)
+	ret, _, _ = advapi32.NewProc("RegQueryValueExW").Call(
+		uintptr(hKey),
+		uintptr(unsafe.Pointer(valName)),
+		0, 0,
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(unsafe.Pointer(&bufLen)),
+	)
+	if ret != 0 {
+		return false
+	}
+	return bufLen > 2 // at least one character + null
 }
 
 func getModuleFileName() string {
@@ -673,15 +729,6 @@ func getModuleFileName() string {
 		return ""
 	}
 	return syscall.UTF16ToString(buf[:n])
-}
-
-func checkAutoStart() bool {
-	val, err := windows.RegGetString(
-		windows.HKEY_CURRENT_USER,
-		`Software\Microsoft\Windows\CurrentVersion\Run`,
-		"QRCoder",
-	)
-	return err == nil && val != ""
 }
 
 // ────────────────────────────────────────────────────────────

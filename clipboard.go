@@ -107,41 +107,57 @@ func restoreClipboard(backup clipboardBackup) {
 	}
 }
 
+// INPUT structure for SendInput
+type KEYBDINPUT struct {
+	WVk         uint16
+	WScan       uint16
+	DwFlags     uint32
+	Time        uint32
+	DwExtraInfo uintptr
+}
+
+type INPUT struct {
+	Type uint32
+	Ki   KEYBDINPUT
+	_    [8]byte // padding for MOUSEINPUT/HARDWAREINPUT union
+}
+
+const (
+	INPUT_KEYBOARD    = 1
+	KEYEVENTF_KEYDOWN = 0x0000
+	KEYEVENTF_KEYUP   = 0x0002
+)
+
 func simulateCtrlC() {
 	user32 := windows.NewLazySystemDLL("user32.dll")
+	sendInput := user32.NewProc("SendInput")
 
-	keybdEvent := user32.NewProc("keybd_event")
+	inputs := [4]INPUT{
+		// Ctrl down
+		{Type: INPUT_KEYBOARD, Ki: KEYBDINPUT{WVk: 0x11, WScan: 0x1D, DwFlags: 0}},
+		// C down
+		{Type: INPUT_KEYBOARD, Ki: KEYBDINPUT{WVk: 0x43, WScan: 0x2E, DwFlags: 0}},
+	}
 
-	// Press Ctrl
-	keybdEvent.Call(
-		0x11, // VK_CONTROL
-		0x1D, // scan code
-		0,    // KEYEVENTF_KEYDOWN = 0
-		0,
+	// Send key down events
+	sendInput.Call(
+		uintptr(2),
+		uintptr(unsafe.Pointer(&inputs[0])),
+		uintptr(unsafe.Sizeof(INPUT{})),
 	)
-	// Press C
-	keybdEvent.Call(
-		0x43, // 'C'
-		0x2E, // scan code
-		0,    // KEYEVENTF_KEYDOWN = 0
-		0,
-	)
-	// Small delay for the key event to be processed
-	// (sleep happens after keybd_event in the caller)
 
-	// Release C
-	keybdEvent.Call(
-		0x43, // 'C'
-		0x2E, // scan code
-		0x02, // KEYEVENTF_KEYUP
-		0,
-	)
-	// Release Ctrl
-	keybdEvent.Call(
-		0x11, // VK_CONTROL
-		0x1D, // scan code
-		0x02, // KEYEVENTF_KEYUP
-		0,
+	// Brief pause for foreground app to register the Ctrl+C state
+	time.Sleep(10 * time.Millisecond)
+
+	// C up
+	inputs[2] = INPUT{Type: INPUT_KEYBOARD, Ki: KEYBDINPUT{WVk: 0x43, WScan: 0x2E, DwFlags: KEYEVENTF_KEYUP}}
+	// Ctrl up
+	inputs[3] = INPUT{Type: INPUT_KEYBOARD, Ki: KEYBDINPUT{WVk: 0x11, WScan: 0x1D, DwFlags: KEYEVENTF_KEYUP}}
+
+	sendInput.Call(
+		uintptr(2),
+		uintptr(unsafe.Pointer(&inputs[2])),
+		uintptr(unsafe.Sizeof(INPUT{})),
 	)
 }
 

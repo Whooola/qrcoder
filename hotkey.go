@@ -49,7 +49,13 @@ var (
 // ────────────────────────────────────────────────────────────
 
 //export goKeyboardEvent
-func goKeyboardEvent(vkCode C.DWORD, scanCode C.DWORD, flags C.DWORD, _ C.DWORD, _ C.ULONG_PTR) {
+func goKeyboardEvent(vkCode C.DWORD, scanCode C.DWORD, flags C.DWORD, dwTime C.DWORD, dwExtraInfo C.ULONG_PTR) {
+	// flags bit 4 = LLKHF_INJECTED — ignore synthesized/injected events
+	// to prevent the hook from processing our own SendInput keystrokes.
+	if (uint32(flags) & 0x10) != 0 {
+		return
+	}
+
 	// flags bit 7 = transition state (1 = key release, 0 = key press)
 	isKeyUp := (uint32(flags) & 0x80) != 0
 	vk := uint32(vkCode)
@@ -133,10 +139,8 @@ func setHotkeyHook() error {
 	setHook := user32.NewProc("SetWindowsHookExW")
 
 	// Get module handle for the current process (NULL for WH_KEYBOARD_LL)
-	hMod, err := windows.GetModuleHandle(nil)
-	if err != nil {
-		return err
-	}
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+	hMod, _, _ := kernel32.NewProc("GetModuleHandleW").Call(0)
 
 	// Get the C function pointer for LowLevelKeyboardProc
 	hookProc := C.LowLevelKeyboardProc

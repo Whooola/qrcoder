@@ -1,6 +1,8 @@
 package main
 
 import (
+	"unsafe"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -45,12 +47,17 @@ func releaseSingleInstance() {
 // bringExistingToFront finds the existing QRCoder window and
 // brings it to the foreground.
 func bringExistingToFront() {
+	user32 := windows.NewLazySystemDLL("user32.dll")
+
 	// Find window by class name
 	className, _ := windows.UTF16PtrFromString(mainWndClass)
-	hwnd, _ := windows.FindWindow(className, nil)
+	hwnd, _, _ := user32.NewProc("FindWindowW").Call(
+		uintptr(unsafe.Pointer(className)),
+		0,
+	)
 	if hwnd != 0 {
 		// Bring to foreground
-		windows.SetForegroundWindow(hwnd)
-		windows.ShowWindow(hwnd, windows.SW_RESTORE)
+		user32.NewProc("SetForegroundWindow").Call(hwnd)
+		user32.NewProc("ShowWindow").Call(hwnd, 9) // SW_RESTORE = 9
 	}
 }
