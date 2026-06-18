@@ -33,19 +33,23 @@ var (
 
 // ────────────────────────────────────────────────────────────
 // UIA vtable helper functions
+//
+// All COM interface pointers use unsafe.Pointer because go-ole
+// v1.2.6 QueryInterface returns *ole.IDispatch which is not
+// directly assignable to *ole.IUnknown.
 // ────────────────────────────────────────────────────────────
 
 // getUIAVTableEntry gets a vtable function pointer at the given index.
-func getUIAVTableEntry(unk *ole.IUnknown, index uintptr) uintptr {
-	vtable := *(**uintptr)(unsafe.Pointer(unk))
+func getUIAVTableEntry(unk unsafe.Pointer, index uintptr) uintptr {
+	vtable := *(**uintptr)(unk)
 	return *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(vtable)) + index*unsafe.Sizeof(uintptr(0))))
 }
 
 // callGetFocusedElement: IUIAutomation::GetFocusedElement (vtable[8])
 // HRESULT GetFocusedElement([out] IUIAutomationElement **element);
-func callGetFocusedElement(uia *ole.IUnknown) *ole.IUnknown {
+func callGetFocusedElement(uia unsafe.Pointer) *ole.IUnknown {
 	fn := getUIAVTableEntry(uia, 8)
-	this := uintptr(unsafe.Pointer(uia))
+	this := uintptr(uia)
 	var element *ole.IUnknown
 	syscall.SyscallN(fn, this, uintptr(unsafe.Pointer(&element)))
 	return element
@@ -53,9 +57,9 @@ func callGetFocusedElement(uia *ole.IUnknown) *ole.IUnknown {
 
 // callGetCurrentPatternAs: IUIAutomationElement::GetCurrentPatternAs (vtable[14])
 // HRESULT GetCurrentPatternAs(PATTERNID patternId, REFIID riid, void **patternObject);
-func callGetCurrentPatternAs(element *ole.IUnknown, patternId int32, riid *ole.GUID) *ole.IUnknown {
+func callGetCurrentPatternAs(element unsafe.Pointer, patternId int32, riid *ole.GUID) *ole.IUnknown {
 	fn := getUIAVTableEntry(element, 14)
-	this := uintptr(unsafe.Pointer(element))
+	this := uintptr(element)
 	var pattern *ole.IUnknown
 	syscall.SyscallN(
 		fn,
@@ -69,9 +73,9 @@ func callGetCurrentPatternAs(element *ole.IUnknown, patternId int32, riid *ole.G
 
 // callTextGetSelection: IUIAutomationTextPattern::GetSelection (vtable[5])
 // HRESULT GetSelection([out] IUIAutomationTextRangeArray **ranges);
-func callTextGetSelection(textPattern *ole.IUnknown) *ole.IUnknown {
+func callTextGetSelection(textPattern unsafe.Pointer) *ole.IUnknown {
 	fn := getUIAVTableEntry(textPattern, 5)
-	this := uintptr(unsafe.Pointer(textPattern))
+	this := uintptr(textPattern)
 	var ranges *ole.IUnknown
 	syscall.SyscallN(fn, this, uintptr(unsafe.Pointer(&ranges)))
 	return ranges
@@ -79,9 +83,9 @@ func callTextGetSelection(textPattern *ole.IUnknown) *ole.IUnknown {
 
 // callRangeArrayGetLength: IUIAutomationTextRangeArray::get_Length (vtable[3])
 // HRESULT get_Length([out] int *length);
-func callRangeArrayGetLength(ranges *ole.IUnknown) int32 {
+func callRangeArrayGetLength(ranges unsafe.Pointer) int32 {
 	fn := getUIAVTableEntry(ranges, 3)
-	this := uintptr(unsafe.Pointer(ranges))
+	this := uintptr(ranges)
 	var length int32
 	syscall.SyscallN(fn, this, uintptr(unsafe.Pointer(&length)))
 	return length
@@ -89,9 +93,9 @@ func callRangeArrayGetLength(ranges *ole.IUnknown) int32 {
 
 // callRangeArrayGetElement: IUIAutomationTextRangeArray::GetElement (vtable[4])
 // HRESULT GetElement(int index, [out] IUIAutomationTextRange **range);
-func callRangeArrayGetElement(ranges *ole.IUnknown, index int32) *ole.IUnknown {
+func callRangeArrayGetElement(ranges unsafe.Pointer, index int32) *ole.IUnknown {
 	fn := getUIAVTableEntry(ranges, 4)
-	this := uintptr(unsafe.Pointer(ranges))
+	this := uintptr(ranges)
 	var textRange *ole.IUnknown
 	syscall.SyscallN(fn, this, uintptr(index), uintptr(unsafe.Pointer(&textRange)))
 	return textRange
@@ -99,9 +103,9 @@ func callRangeArrayGetElement(ranges *ole.IUnknown, index int32) *ole.IUnknown {
 
 // callTextRangeGetText: IUIAutomationTextRange::GetText (vtable[12])
 // HRESULT GetText(int maxLength, [out] BSTR *text);
-func callTextRangeGetText(textRange *ole.IUnknown, maxLength int32) string {
+func callTextRangeGetText(textRange unsafe.Pointer, maxLength int32) string {
 	fn := getUIAVTableEntry(textRange, 12)
-	this := uintptr(unsafe.Pointer(textRange))
+	this := uintptr(textRange)
 	var bstr *uint16
 	syscall.SyscallN(fn, this, uintptr(maxLength), uintptr(unsafe.Pointer(&bstr)))
 	if bstr == nil {
@@ -155,41 +159,41 @@ func captureByUIAutomation() string {
 	}
 	defer uia.Release()
 
-	// Get the currently focused element
-	focusedElement := callGetFocusedElement(uia)
+	// Get the currently focused element (use unsafe.Pointer for go-ole compat)
+	focusedElement := callGetFocusedElement(unsafe.Pointer(uia))
 	if focusedElement == nil {
 		return ""
 	}
 	defer focusedElement.Release()
 
 	// Get the TextPattern from the focused element
-	textPattern := callGetCurrentPatternAs(focusedElement, UIA_TextPatternId, IID_IUIAutomationTextPattern)
+	textPattern := callGetCurrentPatternAs(unsafe.Pointer(focusedElement), UIA_TextPatternId, IID_IUIAutomationTextPattern)
 	if textPattern == nil {
 		return ""
 	}
 	defer textPattern.Release()
 
 	// Get the text selection ranges
-	ranges := callTextGetSelection(textPattern)
+	ranges := callTextGetSelection(unsafe.Pointer(textPattern))
 	if ranges == nil {
 		return ""
 	}
 	defer ranges.Release()
 
 	// Check how many selection ranges exist
-	count := callRangeArrayGetLength(ranges)
+	count := callRangeArrayGetLength(unsafe.Pointer(ranges))
 	if count <= 0 {
 		return ""
 	}
 
 	// Get the first selection range
-	textRange := callRangeArrayGetElement(ranges, 0)
+	textRange := callRangeArrayGetElement(unsafe.Pointer(ranges), 0)
 	if textRange == nil {
 		return ""
 	}
 	defer textRange.Release()
 
 	// Get the text from the range (-1 = all text in the range)
-	text := callTextRangeGetText(textRange, -1)
+	text := callTextRangeGetText(unsafe.Pointer(textRange), -1)
 	return text
 }

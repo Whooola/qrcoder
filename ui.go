@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"image"
 	"image/png"
 	"sync"
 	"syscall"
@@ -567,7 +566,7 @@ func paintResultPopup(hwnd HANDLE, data *resultPopupData) {
 	defer user32.NewProc("EndPaint").Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
 
 	// White background
-	whiteBrush := gdi32.NewProc("GetStockObject").Call(0) // WHITE_BRUSH
+	whiteBrush, _, _ := gdi32.NewProc("GetStockObject").Call(0) // WHITE_BRUSH
 	user32.NewProc("FillRect").Call(hdc, uintptr(unsafe.Pointer(&rect)), whiteBrush)
 
 	// Draw text
