@@ -1,0 +1,19 @@
+# Build output
+qrcoder.exe
+*.syso
+
+# Go
+go.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude local settings
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
