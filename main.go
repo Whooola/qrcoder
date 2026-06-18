@@ -477,6 +477,12 @@ func mainWindowProc(hwnd HANDLE, msg UINT, wParam WPARAM, lParam LPARAM) LRESULT
 // ────────────────────────────────────────────────────────────
 
 func handleGenerate() {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("handleGenerate panic recovered: %v", r)
+		}
+	}()
+
 	text := captureSelection()
 	if text == "" {
 		// No text selected — switch to scan mode

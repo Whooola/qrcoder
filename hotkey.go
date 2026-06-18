@@ -50,9 +50,10 @@ var (
 
 //export goKeyboardEvent
 func goKeyboardEvent(vkCode C.DWORD, scanCode C.DWORD, flags C.DWORD, dwTime C.DWORD, dwExtraInfo C.ULONG_PTR) {
-	// flags bit 4 = LLKHF_INJECTED — ignore synthesized/injected events
-	// to prevent the hook from processing our own SendInput keystrokes.
-	if (uint32(flags) & 0x10) != 0 {
+	// flags bits 4-5 = LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED
+	// Ignore synthesized/injected events to prevent the hook from
+	// processing our own SendInput/Ctrl+C keystrokes.
+	if (uint32(flags) & 0x30) != 0 {
 		return
 	}
 

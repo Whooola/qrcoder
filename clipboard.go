@@ -19,49 +19,128 @@ const (
 )
 
 // captureSelection gets the currently selected text from the foreground
-// application. It first tries UI Automation (direct, no clipboard interference).
-// Falls back to simulating Ctrl+C if UIA is unavailable.
-func captureSelection() string {
-	// Primary: UI Automation — directly reads selected text
-	if text := captureByUIAutomation(); text != "" {
+// application using a multi-layer approach. Each layer is tried in order;
+// if one fails or crashes, the next is attempted. A recover() guard ensures
+// no panic in any layer can break the message handler.
+func captureSelection() (text string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("captureSelection panic recovered: %v", r)
+			text = ""
+		}
+	}()
+
+	// Layer 1: UI Automation — direct, no clipboard, most reliable
+	if text = safeUIA(); text != "" {
 		return text
 	}
 
-	// Fallback: clipboard-based approach
+	// Layer 2: WM_COPY message — send copy command directly to focused control
+	if text = captureByWMCopy(); text != "" {
+		return text
+	}
+
+	// Layer 3: SendInput Ctrl+C — simulate keyboard, widest compatibility
 	return captureByClipboard()
 }
 
-// captureByClipboard sends Ctrl+C to the foreground window and reads
-// the resulting clipboard text. Returns empty string if no text was
-// copied or the clipboard didn't change.
-func captureByClipboard() string {
-	// Save current clipboard content
+// safeUIA calls captureByUIAutomation with its own recover guard.
+func safeUIA() (text string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("UIA panic recovered: %v", r)
+			text = ""
+		}
+	}()
+	return captureByUIAutomation()
+}
+
+// ────────────────────────────────────────────────────────────
+// Layer 2: WM_COPY via AttachThreadInput + SendMessage
+// ────────────────────────────────────────────────────────────
+
+const (
+	WM_COPY = 0x0301
+)
+
+// captureByWMCopy uses AttachThreadInput to attach our input queue
+// to the foreground thread, then sends WM_COPY to the focused control.
+// This is more reliable than simulating Ctrl+C because it bypasses
+// keyboard input injection entirely.
+func captureByWMCopy() string {
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
+
+	// Get foreground window
+	getForegroundWindow := user32.NewProc("GetForegroundWindow")
+	fgHwnd, _, _ := getForegroundWindow.Call()
+	if fgHwnd == 0 {
+		return ""
+	}
+
+	// Get foreground thread ID
+	getWindowThreadProcessId := user32.NewProc("GetWindowThreadProcessId")
+	fgTid, _, _ := getWindowThreadProcessId.Call(fgHwnd, 0)
+
+	// Get our thread ID
+	getCurrentThreadId := kernel32.NewProc("GetCurrentThreadId")
+	ourTid, _, _ := getCurrentThreadId.Call()
+
+	if fgTid == ourTid {
+		return "" // can't attach to our own thread
+	}
+
+	// Attach input queues
+	attachThreadInput := user32.NewProc("AttachThreadInput")
+	ret, _, _ := attachThreadInput.Call(ourTid, fgTid, 1) // TRUE
+	if ret == 0 {
+		return ""
+	}
+	defer attachThreadInput.Call(ourTid, fgTid, 0) // FALSE
+
+	// Get the focused control in the foreground window
+	getFocus := user32.NewProc("GetFocus")
+	focusHwnd, _, _ := getFocus.Call()
+	if focusHwnd == 0 {
+		return ""
+	}
+
+	// Save clipboard, send WM_COPY, read result, restore
 	backup := backupClipboard()
 
-	// Send Ctrl+C to the foreground window
-	simulateCtrlC()
+	sendMessageW := user32.NewProc("SendMessageW")
+	sendMessageW.Call(focusHwnd, WM_COPY, 0, 0)
 
-	// Wait for clipboard update (with retry logic)
 	result := waitForClipboardChange(backup)
-
-	// Restore original clipboard content
 	restoreClipboard(backup)
 
 	return result
 }
 
+// ────────────────────────────────────────────────────────────
+// Layer 3: SendInput Ctrl+C (fallback)
+// ────────────────────────────────────────────────────────────
+
+// captureByClipboard sends Ctrl+C to the foreground window and reads
+// the resulting clipboard text.
+func captureByClipboard() string {
+	backup := backupClipboard()
+	simulateCtrlC()
+	result := waitForClipboardChange(backup)
+	restoreClipboard(backup)
+	return result
+}
+
 // waitForClipboardChange waits for the clipboard to be updated with
-// new text after the Ctrl+C simulation.
+// new text after a copy command. Retries with increasing delays.
 func waitForClipboardChange(backup clipboardBackup) string {
-	// Try multiple times with increasing wait
-	for i := 0; i < 5; i++ {
-		time.Sleep(time.Duration(30+10*i) * time.Millisecond)
+	for i := 0; i < 8; i++ {
+		time.Sleep(time.Duration(20+10*i) * time.Millisecond)
 		result := readClipboardText()
 		if result != "" && result != backup.text {
 			return result
 		}
 	}
-	// Last attempt: just return whatever is there
 	return readClipboardText()
 }
 
@@ -157,9 +236,6 @@ func simulateCtrlC() {
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	sendInput := user32.NewProc("SendInput")
 
-	// Send each key event individually with small delays to mimic
-	// real keyboard input timing. This is more reliable than sending
-	// all events at once, which some applications may not process correctly.
 	sendKey := func(vk uint16, scan uint16, flags uint32) bool {
 		input := INPUT{
 			Type: INPUT_KEYBOARD,
@@ -178,20 +254,20 @@ func simulateCtrlC() {
 		return ret != 0
 	}
 
-	// Ctrl down
-	sendKey(0x11, 0, KEYEVENTF_KEYDOWN)
+	// Ctrl down (VK_CONTROL=0x11, scan=0x1D)
+	sendKey(0x11, 0x1D, KEYEVENTF_KEYDOWN)
 	time.Sleep(5 * time.Millisecond)
 
-	// C down
-	sendKey(0x43, 0, KEYEVENTF_KEYDOWN)
-	time.Sleep(10 * time.Millisecond)
+	// C down (VK_C=0x43, scan=0x2E)
+	sendKey(0x43, 0x2E, KEYEVENTF_KEYDOWN)
+	time.Sleep(15 * time.Millisecond)
 
 	// C up
-	sendKey(0x43, 0, KEYEVENTF_KEYUP)
+	sendKey(0x43, 0x2E, KEYEVENTF_KEYUP)
 	time.Sleep(5 * time.Millisecond)
 
 	// Ctrl up
-	sendKey(0x11, 0, KEYEVENTF_KEYUP)
+	sendKey(0x11, 0x1D, KEYEVENTF_KEYUP)
 	time.Sleep(10 * time.Millisecond)
 }
 
