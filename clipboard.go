@@ -18,26 +18,51 @@ const (
 	CF_TEXT        = 1
 )
 
-// captureSelection sends Ctrl+C to the foreground window and reads
+// captureSelection gets the currently selected text from the foreground
+// application. It first tries UI Automation (direct, no clipboard interference).
+// Falls back to simulating Ctrl+C if UIA is unavailable.
+func captureSelection() string {
+	// Primary: UI Automation — directly reads selected text
+	if text := captureByUIAutomation(); text != "" {
+		return text
+	}
+
+	// Fallback: clipboard-based approach
+	return captureByClipboard()
+}
+
+// captureByClipboard sends Ctrl+C to the foreground window and reads
 // the resulting clipboard text. Returns empty string if no text was
 // copied or the clipboard didn't change.
-func captureSelection() string {
+func captureByClipboard() string {
 	// Save current clipboard content
 	backup := backupClipboard()
 
 	// Send Ctrl+C to the foreground window
 	simulateCtrlC()
 
-	// Wait for clipboard update
-	time.Sleep(70 * time.Millisecond)
-
-	// Read clipboard text
-	result := readClipboardText()
+	// Wait for clipboard update (with retry logic)
+	result := waitForClipboardChange(backup)
 
 	// Restore original clipboard content
 	restoreClipboard(backup)
 
 	return result
+}
+
+// waitForClipboardChange waits for the clipboard to be updated with
+// new text after the Ctrl+C simulation.
+func waitForClipboardChange(backup clipboardBackup) string {
+	// Try multiple times with increasing wait
+	for i := 0; i < 5; i++ {
+		time.Sleep(time.Duration(30+10*i) * time.Millisecond)
+		result := readClipboardText()
+		if result != "" && result != backup.text {
+			return result
+		}
+	}
+	// Last attempt: just return whatever is there
+	return readClipboardText()
 }
 
 // clipboardBackup holds saved clipboard text content.
@@ -132,33 +157,42 @@ func simulateCtrlC() {
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	sendInput := user32.NewProc("SendInput")
 
-	inputs := [4]INPUT{
-		// Ctrl down
-		{Type: INPUT_KEYBOARD, Ki: KEYBDINPUT{WVk: 0x11, WScan: 0x1D, DwFlags: 0}},
-		// C down
-		{Type: INPUT_KEYBOARD, Ki: KEYBDINPUT{WVk: 0x43, WScan: 0x2E, DwFlags: 0}},
+	// Send each key event individually with small delays to mimic
+	// real keyboard input timing. This is more reliable than sending
+	// all events at once, which some applications may not process correctly.
+	sendKey := func(vk uint16, scan uint16, flags uint32) bool {
+		input := INPUT{
+			Type: INPUT_KEYBOARD,
+			Ki: KEYBDINPUT{
+				WVk:         vk,
+				WScan:       scan,
+				DwFlags:     flags,
+				DwExtraInfo: 0,
+			},
+		}
+		ret, _, _ := sendInput.Call(
+			uintptr(1),
+			uintptr(unsafe.Pointer(&input)),
+			uintptr(unsafe.Sizeof(INPUT{})),
+		)
+		return ret != 0
 	}
 
-	// Send key down events
-	sendInput.Call(
-		uintptr(2),
-		uintptr(unsafe.Pointer(&inputs[0])),
-		uintptr(unsafe.Sizeof(INPUT{})),
-	)
+	// Ctrl down
+	sendKey(0x11, 0, KEYEVENTF_KEYDOWN)
+	time.Sleep(5 * time.Millisecond)
 
-	// Brief pause for foreground app to register the Ctrl+C state
+	// C down
+	sendKey(0x43, 0, KEYEVENTF_KEYDOWN)
 	time.Sleep(10 * time.Millisecond)
 
 	// C up
-	inputs[2] = INPUT{Type: INPUT_KEYBOARD, Ki: KEYBDINPUT{WVk: 0x43, WScan: 0x2E, DwFlags: KEYEVENTF_KEYUP}}
-	// Ctrl up
-	inputs[3] = INPUT{Type: INPUT_KEYBOARD, Ki: KEYBDINPUT{WVk: 0x11, WScan: 0x1D, DwFlags: KEYEVENTF_KEYUP}}
+	sendKey(0x43, 0, KEYEVENTF_KEYUP)
+	time.Sleep(5 * time.Millisecond)
 
-	sendInput.Call(
-		uintptr(2),
-		uintptr(unsafe.Pointer(&inputs[2])),
-		uintptr(unsafe.Sizeof(INPUT{})),
-	)
+	// Ctrl up
+	sendKey(0x11, 0, KEYEVENTF_KEYUP)
+	time.Sleep(10 * time.Millisecond)
 }
 
 func readClipboardText() string {
