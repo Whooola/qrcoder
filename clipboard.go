@@ -133,15 +133,18 @@ func captureByClipboard() string {
 
 // waitForClipboardChange waits for the clipboard to be updated with
 // new text after a copy command. Retries with increasing delays.
+// Returns "" if the clipboard did not change — this prevents returning
+// stale clipboard content as if it were the current selection.
 func waitForClipboardChange(backup clipboardBackup) string {
 	for i := 0; i < 8; i++ {
 		time.Sleep(time.Duration(20+10*i) * time.Millisecond)
 		result := readClipboardText()
 		if result != "" && result != backup.text {
+			log.Printf("clipboard: captured %d chars via fallback", len([]rune(result)))
 			return result
 		}
 	}
-	return readClipboardText()
+	return "" // no change detected — don't return stale data
 }
 
 // clipboardBackup holds saved clipboard text content.

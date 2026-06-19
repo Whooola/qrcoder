@@ -483,12 +483,14 @@ func handleGenerate() {
 		}
 	}()
 
+	log.Println("handleGenerate: capturing selection...")
 	text := captureSelection()
 	if text == "" {
-		// No text selected — switch to scan mode
+		log.Println("handleGenerate: no text selected, switching to scan")
 		handleScan()
 		return
 	}
+	log.Printf("handleGenerate: captured %d chars, generating QR", len([]rune(text)))
 	pngBytes, truncated, err := generateQR(text)
 	if err != nil {
 		showError("生成失败", err.Error())

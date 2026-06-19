@@ -51,8 +51,6 @@ var (
 //export goKeyboardEvent
 func goKeyboardEvent(vkCode C.DWORD, scanCode C.DWORD, flags C.DWORD, dwTime C.DWORD, dwExtraInfo C.ULONG_PTR) {
 	// flags bits 4-5 = LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED
-	// Ignore synthesized/injected events to prevent the hook from
-	// processing our own SendInput/Ctrl+C keystrokes.
 	if (uint32(flags) & 0x30) != 0 {
 		return
 	}
@@ -61,24 +59,21 @@ func goKeyboardEvent(vkCode C.DWORD, scanCode C.DWORD, flags C.DWORD, dwTime C.D
 	isKeyUp := (uint32(flags) & 0x80) != 0
 	vk := uint32(vkCode)
 
+	// Hold the mutex for ALL state access to avoid data races.
+	ctrlMu.Lock()
+	defer ctrlMu.Unlock()
+
 	if vk != ctrlVK {
-		// Another key was pressed while Ctrl might be held — this
-		// is a normal shortcut (Ctrl+C, Ctrl+V, etc.), so reset.
 		if ctrlSt == ctrlFirstDown && !isKeyUp {
 			otherKeyDown = true
 		}
 		return
 	}
 
-	ctrlMu.Lock()
-	defer ctrlMu.Unlock()
-
 	if isKeyUp {
-		// Ctrl released
 		switch ctrlSt {
 		case ctrlFirstDown:
 			if otherKeyDown {
-				// Was a shortcut, not a clean Ctrl press
 				ctrlSt = ctrlIdle
 				otherKeyDown = false
 			} else {
@@ -89,7 +84,6 @@ func goKeyboardEvent(vkCode C.DWORD, scanCode C.DWORD, flags C.DWORD, dwTime C.D
 			ctrlSt = ctrlIdle
 		}
 	} else {
-		// Ctrl pressed
 		switch ctrlSt {
 		case ctrlIdle:
 			ctrlSt = ctrlFirstDown
@@ -97,13 +91,11 @@ func goKeyboardEvent(vkCode C.DWORD, scanCode C.DWORD, flags C.DWORD, dwTime C.D
 		case ctrlFirstUp:
 			if time.Since(ctrlFirstUpAt) <= doubleCtrlWindow {
 				ctrlSt = ctrlIdle
-				// TRIGGER! Fire callback in a goroutine to avoid
-				// blocking the hook chain.
+				log.Println("double-Ctrl detected")
 				if onDoubleCtrl != nil {
 					go onDoubleCtrl()
 				}
 			} else {
-				// Window expired — this is a new first press
 				ctrlSt = ctrlFirstDown
 				otherKeyDown = false
 			}
